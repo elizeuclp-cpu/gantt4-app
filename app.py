@@ -1,13 +1,13 @@
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
+import plotly.express as px
+import plotly.graph_objects as go
 
 # ---------------------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Gestão de Portfólio de LTs",
+    page_title="Gestão de Portfólio de LTs (Interativo)",
     page_icon="⚡",
     layout="wide"
 )
@@ -21,7 +21,7 @@ st.title("⚡ Gestão de Portfólio de Obras de Transmissão")
 def load_data(file_source):
     df = pd.read_excel(file_source, sheet_name="Base_Dados")
     
-    # Tratamento de tipos e valores nulos para evitar erros no sort_values
+    # Tratamento de tipos e valores nulos
     df = df.dropna(subset=['Ano', 'Custo total (R$)'])
     df['Ano_Int'] = pd.to_numeric(df['Ano'], errors='coerce')
     df = df.dropna(subset=['Ano_Int'])
@@ -31,7 +31,6 @@ def load_data(file_source):
     df['Obra_Label'] = df['ID'] + " - " + df['Nome']
     return df
 
-# Permitir upload pela barra lateral ou carregar o arquivo local por padrão
 uploaded_file = st.sidebar.file_uploader("Carregue sua base de dados Excel", type=["xlsx", "xls"])
 NOME_ARQUIVO_PADRAO = "base_dados_gantt_LT_ficticia-5.xlsx"
 
@@ -62,12 +61,12 @@ CORES_ETAPAS = {
 }
 
 # ---------------------------------------------------------
-# 2. PAINEL SUPERIOR: MATRIZ EDITÁVEL
+# 2. PAINEL SUPERIOR: REORGANIZAÇÃO DE ANOS E VALORES
 # ---------------------------------------------------------
-st.subheader("✍️ Matriz Editável de Aportes Financeiros")
+st.subheader("✍️ Painel de Ajuste e Realocação Financeira")
 
 obras_unicas = sorted(df_raw['Obra_Label'].unique())
-obra_selecionada = st.selectbox("Selecione uma Linha de Transmissão para editar os aportes:", obras_unicas)
+obra_selecionada = st.selectbox("Selecione uma Linha de Transmissão para gerenciar os aportes:", obras_unicas)
 
 # Pivotar para formar a Matriz (Etapas x Anos) para a obra escolhida
 df_obra = df_raw[df_raw['Obra_Label'] == obra_selecionada]
@@ -79,15 +78,14 @@ matriz_df = df_obra.pivot_table(
     fill_value=0
 )
 
-st.caption("Altere ou redistribua os valores na tabela abaixo. O gráfico de Gantt abaixo será rebalanceado automaticamente em tempo real:")
+st.caption("💡 **Para mover ou alterar aportes:** Edite os valores diretamente nas colunas correspondentes aos anos. Ao zerar um ano e preencher outro, a barra do gráfico é remanejada automaticamente no gráfico interativo abaixo.")
 matriz_editada = st.data_editor(matriz_df, use_container_width=True)
 
 # ---------------------------------------------------------
-# 3. CONSOLIDAÇÃO DOS DADOS (REBALANCEAMENTO E CONTINUIDADE)
+# 3. CONSOLIDAÇÃO DOS DADOS
 # ---------------------------------------------------------
 df_modificado = df_raw.copy()
 
-# Atualizar os valores editados de volta no dataframe principal
 for etapa in matriz_editada.index:
     for ano in matriz_editada.columns:
         novo_valor = matriz_editada.loc[etapa, ano]
@@ -107,17 +105,15 @@ for etapa in matriz_editada.index:
             }
             df_modificado = pd.concat([df_modificado, pd.DataFrame([nova_linha])], ignore_index=True)
 
-# Garantir tipos numéricos estritos na coluna de anos
 df_modificado['Ano_Int'] = pd.to_numeric(df_modificado['Ano_Int'], errors='coerce')
 df_modificado = df_modificado.dropna(subset=['Ano_Int'])
 df_modificado['Ano_Int'] = df_modificado['Ano_Int'].astype(int)
 
-# Agrupar dados consolidados eliminando zeros
 df_gantt = df_modificado[df_modificado['Custo total (R$)'] > 0].groupby(
     ['Obra_Label', 'Etapa', 'Ano_Int']
 )['Custo total (R$)'].sum().reset_index()
 
-# Algoritmo de Continuidade: Agrupar Anos Consecutivos para criar Barras Unificadas
+# Consolidação de Anos Consecutivos
 intervalos = []
 for (obra, etapa), group in df_gantt.groupby(['Obra_Label', 'Etapa']):
     group = group.sort_values('Ano_Int')
@@ -155,94 +151,57 @@ for (obra, etapa), group in df_gantt.groupby(['Obra_Label', 'Etapa']):
 df_inter = pd.DataFrame(intervalos)
 
 # ---------------------------------------------------------
-# 4. PLOTAGEM DO GANTT COM SUB-LINHAS DINÂMICAS E BARRAS CONTÍNUAS
+# 4. GRÁFICO GANTT TOTALMENTE INTERATIVO COM PLOTLY
 # ---------------------------------------------------------
 st.divider()
-st.subheader("📊 Cronograma Unificado do Portfólio (Gantt)")
+st.subheader("📊 Cronograma Unificado Interativo (Plotly)")
 
-fig, ax = plt.subplots(figsize=(14, 8), dpi=300)
-ax.set_facecolor("#f8f9fa")
+if not df_inter.empty:
+    fig = go.Figure()
 
-y_positions = {obra: i * 1.3 for i, obra in enumerate(obras_unicas[::-1])}
-anos_globais = sorted(df_raw['Ano_Int'].unique())
-
-for obra in obras_unicas:
-    df_o = df_inter[df_inter['Obra'] == obra] if not df_inter.empty else pd.DataFrame()
-    y_center = y_positions[obra]
-    row_height = 0.85
-    
-    if not df_o.empty:
-        etapas_na_obra = df_o['Etapa'].unique()
-        n_etapas = len(etapas_na_obra)
-        sub_height = row_height / max(n_etapas, 1)
+    for _, row in df_inter.iterrows():
+        duracao = f"{row['Ano_Inicio']}-{row['Ano_Fim']}" if row['Ano_Inicio'] != row['Ano_Fim'] else f"{row['Ano_Inicio']}"
+        custo = row['Custo_Total']
+        custo_fmt = f"R$ {custo/1e3:.0f}k" if custo >= 1e3 else f"R$ {custo:.0f}"
         
-        for i, (_, row) in enumerate(df_o.iterrows()):
-            etapa = row['Etapa']
-            ano_i = row['Ano_Inicio']
-            ano_f = row['Ano_Fim']
-            custo = row['Custo_Total']
-            cor = CORES_ETAPAS.get(etapa, "#333333")
-            
-            idx_etapa = list(etapas_na_obra).index(etapa)
-            sub_y = y_center + (row_height / 2) - (idx_etapa * sub_height) - (sub_height / 2)
-            
-            left = ano_i - 0.425
-            width = (ano_f - ano_i + 1) - 0.15
-            
-            ax.barh(
-                y=sub_y, 
-                width=width, 
-                left=left, 
-                height=sub_height * 0.88, 
-                color=cor, 
-                edgecolor="white", 
-                linewidth=0.8,
-                zorder=3
-            )
-            
-            duracao = f"{ano_i}-{ano_f}" if ano_i != ano_f else f"{ano_i}"
-            custo_fmt = f"R$ {custo/1e3:.0f}k" if custo >= 1e3 else f"R$ {custo:.0f}"
-            
-            font_size = 7.5 if n_etapas <= 2 else 6
-            ax.text(
-                left + width / 2, 
-                sub_y, 
-                f"{etapa} ({duracao}): {custo_fmt}", 
-                ha='center', 
-                va='center', 
-                color='white', 
-                fontsize=font_size, 
-                fontweight='bold',
-                zorder=4
-            )
+        x_start = row['Ano_Inicio'] - 0.4
+        x_end = row['Ano_Fim'] + 0.4
+        
+        fig.add_trace(go.Bar(
+            y=[row['Obra']],
+            x=[x_end - x_start],
+            base=[x_start],
+            orientation='h',
+            name=row['Etapa'],
+            marker_color=CORES_ETAPAS.get(row['Etapa'], "#333333"),
+            hoverinfo='text',
+            hovertext=f"<b>Obra:</b> {row['Obra']}<br><b>Etapa:</b> {row['Etapa']}<br><b>Período:</b> {duracao}<br><b>Investimento:</b> {custo_fmt}",
+            text=f"{row['Etapa']} ({duracao}): {custo_fmt}",
+            textposition='inside',
+            insidetextanchor='middle',
+            showlegend=False
+        ))
 
-# Formatação visual do gráfico
-ax.set_yticks([y_positions[o] for o in obras_unicas[::-1]])
-ax.set_yticklabels(obras_unicas[::-1], fontsize=9.5, fontweight='bold', color="#2c3e50")
+    anos_globais = sorted(df_raw['Ano_Int'].unique())
+    fig.update_layout(
+        height=600,
+        barmode='stack',
+        xaxis=dict(
+            title="Anos do Cronograma",
+            tickmode='array',
+            tickvals=anos_globais,
+            ticktext=[str(a) for a in anos_globais],
+            range=[min(anos_globais) - 0.8, max(anos_globais) + 0.8],
+            gridcolor='#dcdde1'
+        ),
+        yaxis=dict(
+            title="Linhas de Transmissão",
+            autorange="reversed"
+        ),
+        plot_bgcolor="#f8f9fa",
+        margin=dict(l=50, r=50, t=30, b=50)
+    )
 
-ax.set_xticks(anos_globais)
-ax.set_xticklabels([str(a) for a in anos_globais], fontsize=10, fontweight='bold', color="#2c3e50")
-
-ax.set_xlabel("Eixo X: Anos do Cronograma", fontsize=11, fontweight='bold', labelpad=10, color="#2c3e50")
-ax.set_ylabel("Eixo Y: Linhas de Transmissão", fontsize=11, fontweight='bold', labelpad=10, color="#2c3e50")
-
-ax.grid(axis='x', color='#dcdde1', linestyle='--', linewidth=1, zorder=1)
-ax.set_axisbelow(True)
-
-# Legenda das Macroetapas
-legend_patches = [
-    mpatches.Patch(color=color, label=etapa) 
-    for etapa, color in CORES_ETAPAS.items() 
-    if not df_gantt.empty and etapa in df_gantt['Etapa'].unique()
-]
-ax.legend(
-    handles=legend_patches, 
-    title="Macroetapas", 
-    bbox_to_anchor=(1.01, 1), 
-    loc='upper left', 
-    frameon=True, 
-    facecolor='#ffffff', 
-    edgecolor='#dcdde1'
-)
-
-st.pyplot(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.warning("Nenhum dado encontrado para gerar o gráfico.")
